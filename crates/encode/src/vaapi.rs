@@ -520,7 +520,10 @@ mod tests {
     fn low_delay_b_is_asked_for_only_where_a_device_needs_it() {
         let both_lists = (3 << 16) | 3;
         assert!(needs_low_delay_b(0x7, both_lists), "Intel, Alder Lake");
-        assert!(!needs_low_delay_b(VA_ATTRIB_NOT_SUPPORTED, 1), "AMD, radeonsi");
+        assert!(
+            !needs_low_delay_b(VA_ATTRIB_NOT_SUPPORTED, 1),
+            "AMD, radeonsi"
+        );
         // A second list that is required but has no room cannot be used.
         assert!(!needs_low_delay_b(0x5, 3));
         // No constraint on the second list: predicted slices are fine.
@@ -2237,8 +2240,7 @@ impl<'a> Context<'a> {
         // **Asked once, here, for the same reason.** A device that codes no
         // predicted HEVC slices accepts the first picture and fails every one
         // after it, which reads as an encoder that stopped answering.
-        let low_delay_b =
-            matches!(params, Params::H265(_)) && self.display.low_delay_b(self.caps);
+        let low_delay_b = matches!(params, Params::H265(_)) && self.display.low_delay_b(self.caps);
         if low_delay_b {
             lowlat_common::log_info!(
                 "vaapi: the device codes no predicted HEVC slices, sending low-delay B"
@@ -3099,8 +3101,8 @@ impl Encoder<'_> {
         push(self.buffer(crate::ffi::va::VAEncSliceParameterBufferType, &slice)?);
 
         let mut header = [0u8; 64];
-        let written = crate::h265::slice_header(params, picture, &mut header)
-            .ok_or(Error::NoEncoder)?;
+        let written =
+            crate::h265::slice_header(params, picture, &mut header).ok_or(Error::NoEncoder)?;
         let (head, data) = self.packed(
             crate::ffi::va::VAEncPackedHeaderSlice,
             &header[..written.bytes_written],
