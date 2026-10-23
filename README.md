@@ -1,18 +1,20 @@
 # lowlat
 
 > **A personal build.** This is a copy of [nomi-san/lowlat](https://github.com/nomi-san/lowlat)
-> with four fixes that are sent upstream but not merged yet. With them it hosts on Ubuntu 26.04
-> under GNOME, on AMD, Intel and NVIDIA:
+> with four fixes that are sent upstream but not merged yet, and one that is only here. With them
+> it hosts on Ubuntu 26.04 under GNOME, on AMD, Intel and NVIDIA:
 >
 > - [#3](https://github.com/nomi-san/lowlat/pull/3): GNOME's ten-bit screen (`XRGB2101010`) is captured; without it nothing streams.
 > - [#4](https://github.com/nomi-san/lowlat/pull/4): a game on an AMD APU no longer freezes the stream on old pictures.
 > - [#5](https://github.com/nomi-san/lowlat/pull/5): GNOME's `HDMI-1` is matched to the kernel's `HDMI-A-1`, so the pointer stays on an HDMI screen.
 > - [#6](https://github.com/nomi-san/lowlat/pull/6): HEVC works on Intel's integrated GPUs instead of hanging the GPU.
+> - Copy and paste with a Parsec client works on GNOME, both ways. Only in this build: GNOME has no
+>   clipboard lowlat could reach, and this reaches it through Mutter's remote desktop interface.
 >
-> To install, download the `.deb` from this repository's Releases, then:
+> To install, download the newest `.deb` from this repository's Releases, then:
 >
 > ```sh
-> sudo apt install ./lowlat-all-fixes.deb
+> sudo apt install ./lowlat-personal.deb
 > sudo lowlat-login --install
 > ```
 >
