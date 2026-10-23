@@ -39,11 +39,11 @@ const CLIP_OBJECT: &str = "/klipper";
 const CLIP_FACE: &str = "org.kde.klipper.klipper";
 
 /// A reply that is not this size is not one this reads.
-const HEADER: usize = 16;
+pub(crate) const HEADER: usize = 16;
 
 /// The most a reply may carry, so a bus that answers nonsense cannot be
 /// answered with an allocation.
-const MAX_MESSAGE: usize = 64 * 1024;
+pub(crate) const MAX_MESSAGE: usize = 64 * 1024;
 
 /// A connection to the session bus, and the lease it is holding.
 #[derive(Debug)]
@@ -167,11 +167,24 @@ impl Screen {
 /// started inside a session; a program that has to guess at one is a program
 /// running outside the session it is describing.
 pub(crate) fn open() -> Result<UnixStream, String> {
+    connect(false)
+}
+
+/// Open the session bus on a connection that may be handed descriptors.
+///
+/// **Asked for in the handshake or never sent.** A bus passes a descriptor
+/// only to a connection that agreed to take them, and refuses the call that
+/// would have carried one otherwise.
+pub(crate) fn open_with_fds() -> Result<UnixStream, String> {
+    connect(true)
+}
+
+fn connect(fds: bool) -> Result<UnixStream, String> {
     let address =
         std::env::var("DBUS_SESSION_BUS_ADDRESS").map_err(|_| "no session bus".to_string())?;
     let path = socket_of(&address).ok_or_else(|| format!("no socket in {address}"))?;
     let mut stream = UnixStream::connect(&path).map_err(|error| format!("{path}: {error}"))?;
-    authenticate(&mut stream)?;
+    authenticate(&mut stream, fds)?;
     Ok(stream)
 }
 
@@ -193,6 +206,7 @@ const REPLY_SERIAL: u8 = 5;
 pub(crate) const DESTINATION: u8 = 6;
 const SENDER: u8 = 7;
 const SIGNATURE: u8 = 8;
+const UNIX_FDS: u8 = 9;
 
 /// One whole message, ready to write.
 ///
@@ -263,6 +277,8 @@ pub(crate) struct Fields {
     pub(crate) reply_serial: Option<u32>,
     pub(crate) sender: Option<String>,
     pub(crate) signature: Option<String>,
+    /// How many descriptors arrived with the message.
+    pub(crate) unix_fds: Option<u32>,
 }
 
 pub(crate) fn read_message(stream: &mut UnixStream) -> Result<Message, String> {
@@ -387,7 +403,7 @@ impl Clip {
 }
 
 /// The first string in a reply body.
-fn string_at(body: &[u8]) -> String {
+pub(crate) fn string_at(body: &[u8]) -> String {
     let len = le32(body, 0) as usize;
     body.get(4..4 + len)
         .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
@@ -418,7 +434,7 @@ fn socket_of(address: &str) -> Option<String> {
 /// **The user is the credential.** The bus reads it off the socket the same
 /// way this program's own channel does, and the name offered here only has to
 /// agree with it.
-fn authenticate(stream: &mut UnixStream) -> Result<(), String> {
+fn authenticate(stream: &mut UnixStream, fds: bool) -> Result<(), String> {
     // SAFETY: reading the calling process's own user identifier.
     let uid = unsafe { libc::getuid() };
     let hex: String = uid
@@ -433,6 +449,15 @@ fn authenticate(stream: &mut UnixStream) -> Result<(), String> {
     let line = read_line(stream)?;
     if !line.starts_with("OK ") {
         return Err(format!("auth refused: {line}"));
+    }
+    if fds {
+        stream
+            .write_all(b"NEGOTIATE_UNIX_FD\r\n")
+            .map_err(|error| format!("auth: {error}"))?;
+        let line = read_line(stream)?;
+        if line != "AGREE_UNIX_FD" {
+            return Err(format!("descriptors refused: {line}"));
+        }
     }
     stream
         .write_all(b"BEGIN\r\n")
@@ -461,7 +486,7 @@ fn read_line(stream: &mut UnixStream) -> Result<String, String> {
 /// Each is skipped by its own width rather than by knowing what it means, and
 /// a field of a type this does not know ends the walk rather than guessing
 /// its width and reading somebody else's bytes as a name.
-fn fields(fields: &[u8]) -> Fields {
+pub(crate) fn fields(fields: &[u8]) -> Fields {
     let mut found = Fields::default();
     let text = |at: usize, len: usize| {
         fields
@@ -483,8 +508,10 @@ fn fields(fields: &[u8]) -> Fields {
         match signature {
             b"u" => {
                 value = value.next_multiple_of(4);
-                if code == REPLY_SERIAL {
-                    found.reply_serial = Some(le32(fields, value));
+                match code {
+                    REPLY_SERIAL => found.reply_serial = Some(le32(fields, value)),
+                    UNIX_FDS => found.unix_fds = Some(le32(fields, value)),
+                    _ => {}
                 }
                 at = value + 4;
             }

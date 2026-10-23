@@ -21,6 +21,8 @@ mod channel;
 mod dbus;
 mod display;
 #[cfg(target_os = "linux")]
+mod mutter;
+#[cfg(target_os = "linux")]
 mod seat;
 mod service;
 #[cfg(target_os = "linux")]

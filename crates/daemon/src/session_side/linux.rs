@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use lowlat_host::admission::Admission;
 
 use crate::service::{Introduced, occupancy};
-use crate::{app, channel, dbus, seat, sni};
+use crate::{app, channel, dbus, mutter, seat, sni};
 
 /// The session agent: connect outward, say what this is, and hold the
 /// connection for as long as the session does.
@@ -36,12 +36,23 @@ pub(crate) fn session() -> ! {
             None
         }
     };
-    let clip = match dbus::Clip::connect() {
-        Ok(clip) => Some(clip),
-        Err(error) => {
-            lowlat_common::log_warn!("session: no clipboard to own, error={error}");
-            None
-        }
+    // **The desktop's own clipboard component where it has one, and GNOME's
+    // compositor where it has none.** Both are the same capability to the
+    // service, which never learns which one answered.
+    let clip: Option<Box<dyn Selection>> = match dbus::Clip::connect() {
+        Ok(clip) => Some(Box::new(clip)),
+        Err(kde) => match mutter::Clip::connect() {
+            Ok(clip) => {
+                lowlat_common::log_info!(
+                    "session: the clipboard is GNOME's, through its remote desktop interface"
+                );
+                Some(Box::new(clip))
+            }
+            Err(gnome) => {
+                lowlat_common::log_warn!("session: no clipboard to own, error={kde}; {gnome}");
+                None
+            }
+        },
     };
     // **Watched rather than asked for, which is the whole reason this is here
     // and not in the service.** A session re-describes an output when it moves
@@ -455,7 +466,7 @@ type Latest = std::sync::Arc<std::sync::Mutex<Option<Vec<lowlat_host::capture::O
 /// remembers, so the change it causes is not read back and handed to the guest
 /// that caused it.
 fn own_clipboard(
-    mut clip: dbus::Clip,
+    mut clip: Box<dyn Selection>,
     to_copy: &std::sync::mpsc::Receiver<String>,
     writer: &Writer,
 ) {
@@ -486,6 +497,35 @@ fn own_clipboard(
 /// How long the clipboard thread waits on the desktop before it looks at what
 /// a guest sent.
 const CLIP_TICK_MS: u64 = 200;
+
+/// A desktop's clipboard, by whichever mechanism its session offers.
+trait Selection: Send {
+    /// Put a guest's text on the desktop's clipboard.
+    fn write(&mut self, text: &str) -> Result<(), String>;
+    /// Wait for the desktop's clipboard to change, and answer with what it
+    /// changed to.
+    fn changed(&mut self, within: std::time::Duration) -> Option<String>;
+}
+
+impl Selection for dbus::Clip {
+    fn write(&mut self, text: &str) -> Result<(), String> {
+        Self::write(self, text)
+    }
+
+    fn changed(&mut self, within: std::time::Duration) -> Option<String> {
+        Self::changed(self, within)
+    }
+}
+
+impl Selection for mutter::Clip {
+    fn write(&mut self, text: &str) -> Result<(), String> {
+        Self::write(self, text)
+    }
+
+    fn changed(&mut self, within: std::time::Duration) -> Option<String> {
+        Self::changed(self, within)
+    }
+}
 
 /// Take or let go of the screen, and say which happened.
 ///
