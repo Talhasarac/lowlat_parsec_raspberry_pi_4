@@ -23,7 +23,7 @@ use lowlat_capture::desktop::Placement;
 use lowlat_capture::scanout::{self, Card, CursorPlane};
 use lowlat_capture::vulkan::{self, Imports, PlaneLayout};
 use lowlat_common::clock::Time;
-use std::os::fd::{AsFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, OwnedFd, RawFd};
 
 use super::{Acquired, Capturable, Selectable};
 
@@ -160,6 +160,12 @@ pub enum Registration {
     Open { surface: u32 },
     /// A slot of the encoder's own ring, which the conversion wrote directly.
     Vulkan { slot: usize },
+    /// The display's own buffer, which the encoder converts as it reads it.
+    ///
+    /// **Borrowed, not owned.** The descriptor is the one the pipeline holds
+    /// for that buffer; the encoder takes its own reference when it queues
+    /// the picture and keeps nothing of this.
+    Direct { key: u64, fd: RawFd },
 }
 
 impl core::fmt::Debug for Registration {
@@ -168,6 +174,7 @@ impl core::fmt::Debug for Registration {
             Self::Vendor { .. } => f.write_str("Vendor"),
             Self::Open { surface } => write!(f, "Open({surface})"),
             Self::Vulkan { slot } => write!(f, "Vulkan({slot})"),
+            Self::Direct { key, .. } => write!(f, "Direct({key:#x})"),
         }
     }
 }
@@ -239,6 +246,9 @@ pub enum Register<'a> {
         device: vulkan::Device,
         targets: Vec<lowlat_capture::convert::TargetRef>,
     },
+    /// An encoder that reads the display's own buffer and converts it itself,
+    /// which is the Pi's: nothing is registered, because nothing is allocated.
+    Direct,
 }
 
 impl core::fmt::Debug for Register<'_> {
@@ -247,6 +257,7 @@ impl core::fmt::Debug for Register<'_> {
             Self::Vendor(_) => f.write_str("Vendor"),
             Self::Open(_) => f.write_str("Open"),
             Self::VulkanRing { targets, .. } => write!(f, "VulkanRing({})", targets.len()),
+            Self::Direct => f.write_str("Direct"),
         }
     }
 }
@@ -263,6 +274,8 @@ enum Pipeline {
     /// The compute interface converting into an encoder's own ring.
     VulkanRing(Box<VulkanRing>),
     Gl(Box<Gl>),
+    /// No conversion at all: the encoder reads the display's buffer.
+    Direct(Box<Direct>),
 }
 
 /// The primary interface's half.
@@ -305,6 +318,29 @@ struct VulkanRing {
     registrations: Vec<Registration>,
 }
 
+/// The display's buffers, handed to an encoder that converts them itself.
+///
+/// **What changed is told by which buffer is on screen, not by what is in
+/// it.** Nothing reads the pixels here, so there is no summary of them; what
+/// stands in is the buffer's identity. That is exact for a compositor that
+/// flips between buffers -- the one on screen is never drawn into, so the
+/// same buffer is the same picture and a new one is a new frame -- which is
+/// what the Pi's does. A compositor that redraws in place would read as never
+/// changing, and the guest would see a still picture until full rate is asked
+/// for.
+struct Direct {
+    /// One descriptor per display buffer, kept while it is in the rotation.
+    held: HashMap<u64, OwnedFd>,
+    /// What each slot of the rotation last carried.
+    registrations: Vec<Registration>,
+    /// The layout the encoder was built for. A buffer in any other is refused
+    /// rather than read as this one.
+    format: drm::buffer::DrmFourcc,
+    pitch: u32,
+    /// The buffer the last submit named, handed out by `collect`.
+    ready: Option<lowlat_capture::convert::Digest>,
+}
+
 impl Pipeline {
     /// How many targets there are, which is the rotation's length.
     fn depth(&self) -> usize {
@@ -312,6 +348,7 @@ impl Pipeline {
             Self::Vulkan(vk) => vk.targets.len(),
             Self::VulkanRing(ring) => ring.targets.len(),
             Self::Gl(gl) => gl.targets.len(),
+            Self::Direct(direct) => direct.registrations.len(),
         }
     }
 
@@ -321,6 +358,7 @@ impl Pipeline {
             Self::Vulkan(vk) => vk.imports.contains_key(&key),
             Self::VulkanRing(ring) => ring.imports.contains_key(&key),
             Self::Gl(gl) => gl.imports.contains_key(&key),
+            Self::Direct(direct) => direct.held.contains_key(&key),
         }
     }
 
@@ -330,6 +368,7 @@ impl Pipeline {
             Self::Vulkan(vk) => vk.imports.len(),
             Self::VulkanRing(ring) => ring.imports.len(),
             Self::Gl(gl) => gl.imports.len(),
+            Self::Direct(direct) => direct.held.len(),
         }
     }
 
@@ -366,6 +405,22 @@ impl Pipeline {
                 drop(fd);
                 gl.imports.insert(key, imported);
             }
+            Self::Direct(direct) => {
+                // **One untiled plane in the layout the encoder was built
+                // for**, or nothing. The encoder reads the bytes as that
+                // layout whatever they are, so a buffer in another is a
+                // picture in the wrong colours rather than a refusal.
+                let first = source.planes.first().ok_or(Error::Register)?;
+                if source.planes.len() != 1
+                    || source.modifier != 0
+                    || source.format != direct.format
+                    || first.offset != 0
+                    || first.pitch != direct.pitch
+                {
+                    return Err(Error::NotTogether);
+                }
+                direct.held.insert(key, fd);
+            }
         }
         Ok(())
     }
@@ -388,6 +443,7 @@ impl Pipeline {
                     gl.device.release(imported);
                 }
             }
+            Self::Direct(direct) => direct.held.clear(),
         }
     }
 
@@ -428,6 +484,13 @@ impl Pipeline {
                 gl.ready = Some(digest);
                 Ok(())
             }
+            Self::Direct(direct) => {
+                let fd = direct.held.get(&key).ok_or(Error::Register)?.as_raw_fd();
+                let registration = direct.registrations.get_mut(slot).ok_or(Error::Register)?;
+                *registration = Registration::Direct { key, fd };
+                direct.ready = Some(lowlat_capture::convert::Digest(key));
+                Ok(())
+            }
         }
     }
 
@@ -443,6 +506,7 @@ impl Pipeline {
             Self::Vulkan(vk) => vk.converter.collect(&vk.device).map_err(Error::Convert),
             Self::VulkanRing(ring) => ring.converter.collect(&ring.device).map_err(Error::Convert),
             Self::Gl(gl) => Ok(gl.ready.take()),
+            Self::Direct(direct) => Ok(direct.ready.take()),
         }
     }
 
@@ -490,7 +554,7 @@ impl Pipeline {
                     .map_err(Error::Convert)?;
                 Ok(())
             }
-            Self::Gl(_) => Ok(()),
+            Self::Gl(_) | Self::Direct(_) => Ok(()),
         }
     }
 
@@ -500,6 +564,7 @@ impl Pipeline {
             Self::Vulkan(vk) => vk.targets.get(slot).map(Slot::registration),
             Self::VulkanRing(ring) => ring.registrations.get(slot),
             Self::Gl(gl) => gl.targets.get(slot).map(|target| &target.registration),
+            Self::Direct(direct) => direct.registrations.get(slot),
         }
     }
 
@@ -509,6 +574,7 @@ impl Pipeline {
             Self::Vulkan(vk) => vk.device.name(),
             Self::VulkanRing(ring) => format!("{} (ring)", ring.device.name()),
             Self::Gl(gl) => gl.device.name().to_string(),
+            Self::Direct(_) => "the encoder's own conversion".to_string(),
         }
     }
 
@@ -549,6 +615,7 @@ impl Pipeline {
                     card.release_linear(region);
                 }
             }
+            Self::Direct(direct) => direct.held.clear(),
         }
     }
 }
@@ -560,6 +627,10 @@ struct Shape {
     height: u32,
     format: drm::buffer::DrmFourcc,
     modifier: u64,
+    /// Bytes per row of the first plane. An encoder that reads the buffer
+    /// itself is built for one, so a change is as much a new picture as a new
+    /// format is.
+    pitch: u32,
 }
 
 impl Shape {
@@ -569,6 +640,7 @@ impl Shape {
             height: fb.height,
             format: fb.format,
             modifier: fb.modifier.map_or(0, u64::from),
+            pitch: fb.planes().next().map_or(0, |plane| plane.pitch),
         }
     }
 }
@@ -723,6 +795,8 @@ impl Display {
                         }))
                     })
             }
+        } else if matches!(register, Register::Direct) {
+            Self::build_direct(depth, colour, chroma_444, backend, shape)
         } else {
             match backend {
                 Some(lowlat_capture::Backend::Vulkan) => {
@@ -843,7 +917,7 @@ impl Display {
                         }
                         // Routed before the backends are chosen; reaching it
                         // here is a construction error, not a pairing.
-                        Register::VulkanRing { .. } => Err(Error::NotTogether),
+                        Register::VulkanRing { .. } | Register::Direct => Err(Error::NotTogether),
                     }?;
                     Slot::Nv12(Target {
                         frame,
@@ -896,7 +970,9 @@ impl Display {
                 // The third interface codes no full chroma on any measured
                 // part, so the pairing is refused rather than silently built
                 // subsampled.
-                (true, Register::VulkanRing { .. }) => return Err(Error::NotTogether),
+                (true, Register::VulkanRing { .. } | Register::Direct) => {
+                    return Err(Error::NotTogether);
+                }
             };
             targets.push(slot);
         }
@@ -905,6 +981,40 @@ impl Display {
             converter,
             imports: HashMap::new(),
             targets,
+        })))
+    }
+
+    /// No interface at all: the encoder reads the display's buffer and
+    /// converts it on the way in, which is the Pi's.
+    ///
+    /// **Nothing is allocated, so the rotation is only bookkeeping**: each
+    /// slot remembers which of the display's buffers it last handed on.
+    fn build_direct(
+        depth: usize,
+        colour: lowlat_capture::convert::Depth,
+        chroma_444: bool,
+        backend: Option<lowlat_capture::Backend>,
+        shape: Shape,
+    ) -> Result<Pipeline, Error> {
+        // The encoder codes eight bits at half-resolution chroma and nothing
+        // else; the stream drops the preference and asks again.
+        if colour.ten_bit() || chroma_444 {
+            return Err(Error::NotTogether);
+        }
+        if let Some(named) = backend {
+            lowlat_common::log_warn!(
+                "display: this encoder converts for itself, so the {named:?} conversion that \
+                 was asked for does not run"
+            );
+        }
+        Ok(Pipeline::Direct(Box::new(Direct {
+            held: HashMap::new(),
+            registrations: (0..depth)
+                .map(|_| Registration::Direct { key: 0, fd: -1 })
+                .collect(),
+            format: shape.format,
+            pitch: shape.pitch,
+            ready: None,
         })))
     }
 
@@ -976,6 +1086,12 @@ impl Display {
             regions,
             ready: None,
         })))
+    }
+
+    /// The layout and row length of what the display is scanning out, as the
+    /// display interface names them, for an encoder that reads it directly.
+    pub fn scanout(&self) -> (u32, u32) {
+        (self.shape.format as u32, self.shape.pitch)
     }
 
     /// Where the captured output sits in the desktop, when that is knowable.

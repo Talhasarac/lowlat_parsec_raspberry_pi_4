@@ -852,6 +852,7 @@ name = "lowlat-encode"
 version = "0.0.0"
 dependencies = [
  "ash",
+ "libc",
  "lowlat-capture",
  "lowlat-common",
  "lowlat-drivers",

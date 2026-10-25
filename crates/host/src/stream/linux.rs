@@ -96,6 +96,7 @@ pub(super) fn build(
         None => match backend {
             Backend::Open => run_open(shared, arrivals, config.clone(), roster),
             Backend::Vendor => run_vendor(shared, arrivals, config.clone(), roster),
+            Backend::V4l2 => run_v4l2(shared, arrivals, config.clone(), roster),
         },
     }
 }
@@ -117,6 +118,10 @@ fn follow_display(config: &Config) -> Backend {
     let driver = crate::display::Display::driver(config.output.as_deref());
     let backend = match driver.as_deref() {
         Some("nvidia") => Backend::Vendor,
+        // **The Pi's display controller draws nothing and encodes nothing**;
+        // its pictures go to the encoder beside it, which reads them as they
+        // are.
+        Some("vc4-drm" | "vc4") => Backend::V4l2,
         _ => Backend::Open,
     };
     lowlat_common::log_info!(
@@ -173,6 +178,7 @@ pub(super) fn chroma_census(config: &Config) -> Result<(), &'static str> {
     match config.backend {
         Some(Backend::Vendor) => vendor_census(ten_bit),
         Some(Backend::Open) => open_census(ten_bit),
+        Some(Backend::V4l2) => Err("the Pi's encoder, which codes no full chroma"),
         None => {
             // **The third interface codes no full chroma on any part measured
             // here**, so preferring it is a refusal and the preference is the
@@ -182,6 +188,11 @@ pub(super) fn chroma_census(config: &Config) -> Result<(), &'static str> {
                 || std::env::var("LOWLAT_VULKAN_ENCODE").is_ok_and(|value| value == "1")
             {
                 return Err("the third encoder, which no measured part serves full chroma");
+            }
+            // **A machine with the Pi's encoder follows its display onto it**,
+            // and that encoder codes no full chroma at all.
+            if lowlat_encode::v4l2::Encoder::present() {
+                return Err("the Pi's encoder, which codes no full chroma");
             }
             // **Both display-following backends are candidates wherever the
             // output may move**, not just where it is now: a move onto a part
@@ -774,6 +785,104 @@ fn run_vendor(
     )
 }
 
+/// How many of the display's buffers the Pi's encoder may hold at once.
+///
+/// The display rotates through two or three, and the encoder converts and codes
+/// a picture in well under a frame, so four leaves room without letting a
+/// picture wait behind others.
+const V4L2_DEPTH: usize = 4;
+
+/// Run the stream on the Pi's encoder, which reads the display's own buffer.
+fn run_v4l2(
+    shared: &Arc<Shared>,
+    arrivals: &mpsc::Receiver<Join>,
+    config: Config,
+    roster: &mut Roster,
+) -> Exit {
+    // **One codec at one depth, and nothing without a display.** Anything
+    // more is refused here, so the stream drops the preference and asks
+    // again; a picture in system memory has no buffer this encoder could read.
+    if config.codec != Codec::H264 || config.ten_bit || config.chroma_444 {
+        lowlat_common::log_info!(
+            "stream: the Pi's encoder codes H.264 at eight bits and 4:2:0, nothing more"
+        );
+        return Exit::Failed(status::ENCODER_CAPABILITIES);
+    }
+    if !config.display {
+        lowlat_common::log_error!("stream: the Pi's encoder reads a display, and there is none");
+        return Exit::Failed(status::ENCODER_UNAVAILABLE);
+    }
+    let Some((width, height, refresh_hz)) = await_display(config.output.as_deref()) else {
+        lowlat_common::log_error!(
+            "stream: nothing has been scanning out for {:.0}s, ending {} guest(s)",
+            DISPLAY_WAIT.as_secs_f64(),
+            roster.active.len()
+        );
+        return Exit::Failed(status::CAPTURE_UNAVAILABLE);
+    };
+    if (width, height) != (config.width, config.height) {
+        lowlat_common::log_info!(
+            "stream: the display is {width}x{height}, not the configured {}x{}; following it",
+            config.width,
+            config.height
+        );
+    }
+    shared.publish_picture(width, height);
+    let config = Config {
+        width,
+        height,
+        fps: settle_pace(shared, shared.asked_fps(), refresh_hz),
+        ..config
+    };
+    // **The display first, then the encoder**: the encoder is built for the
+    // layout and row length the display scans out, which only the display
+    // can say.
+    let mut desktop = match crate::display::Display::open(
+        V4L2_DEPTH,
+        colour_of(&config),
+        false,
+        config.output.as_deref(),
+        config.convert,
+        crate::display::Register::Direct,
+    ) {
+        Ok(desktop) => desktop,
+        Err(error) => {
+            lowlat_common::log_error!("stream: the display could not be opened, {error}");
+            return Exit::Failed(status::CAPTURE_UNAVAILABLE);
+        }
+    };
+    let (drm_format, pitch) = desktop.scanout();
+    let mut encoder = match lowlat_encode::v4l2::Encoder::open(&lowlat_encode::v4l2::Config {
+        width,
+        height,
+        fps: config.fps,
+        bitrate_bps: start_bps(&config),
+        min_qp: config.quality.min_qp(),
+        drm_format,
+        pitch,
+        depth: V4L2_DEPTH,
+    }) {
+        Ok(encoder) => encoder,
+        Err(error) => {
+            lowlat_common::log_error!("stream: the Pi's encoder could not be built, {error}");
+            return Exit::Failed(status::ENCODER_UNAVAILABLE);
+        }
+    };
+    lowlat_common::log_info!(
+        "stream: quality={:?}, quantiser floor {}",
+        config.quality,
+        config.quality.min_qp()
+    );
+    encode_loop(
+        shared,
+        arrivals,
+        config,
+        roster,
+        &mut encoder,
+        Some(&mut desktop),
+    )
+}
+
 /// The lowest level each codec has that carries 1080p60, which is 4.2 on the
 /// first and 4.1 on the second. **They are written on different scales**: ten
 /// times the level number on the first, thirty on the second. Writing the
@@ -807,6 +916,34 @@ impl FromDevice for lowlat_encode::vaapi::Encoder<'_> {
             return false;
         };
         self.submit_registered(*surface, force_keyframe).is_ok()
+    }
+}
+
+impl FromDevice for lowlat_encode::v4l2::Encoder {
+    fn submit_from_device(
+        &mut self,
+        registration: &crate::display::Registration,
+        force_keyframe: bool,
+    ) -> bool {
+        let crate::display::Registration::Direct { key, fd } = registration else {
+            return false;
+        };
+        match self.submit_buffer(*key, *fd, force_keyframe) {
+            Ok(()) => true,
+            Err(lowlat_encode::v4l2::Error::QueueFull) => false,
+            Err(error) => {
+                // **Said once.** A refusal here repeats every frame, and the
+                // stream treats it as back pressure either way.
+                static SAID: std::sync::atomic::AtomicBool =
+                    std::sync::atomic::AtomicBool::new(false);
+                if !SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    lowlat_common::log_error!(
+                        "stream: the Pi's encoder refused a picture, {error}"
+                    );
+                }
+                false
+            }
+        }
     }
 }
 

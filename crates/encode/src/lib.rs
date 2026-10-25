@@ -19,6 +19,8 @@ pub mod h264;
 pub mod h265;
 pub mod nvenc;
 #[cfg(target_os = "linux")]
+pub mod v4l2;
+#[cfg(target_os = "linux")]
 pub mod vaapi;
 #[cfg(target_os = "linux")]
 pub mod vulkan;

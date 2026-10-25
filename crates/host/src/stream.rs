@@ -1118,6 +1118,10 @@ pub enum Backend {
     Open,
     /// The vendor's encoder, through its own runtime.
     Vendor,
+    /// The Raspberry Pi 4's encoder, through the kernel's video interface. It
+    /// reads the display's buffer and converts it itself, so nothing else
+    /// runs on the way.
+    V4l2,
 }
 
 /// How the stream is configured. Fixed for its lifetime.

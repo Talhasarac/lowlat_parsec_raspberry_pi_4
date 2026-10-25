@@ -68,6 +68,10 @@ DeviceAllow=char-nvidia rwm
 DeviceAllow=char-nvidia-uvm rwm
 DeviceAllow=/dev/uinput rw
 DeviceAllow=/dev/uhid rw
+# The Raspberry Pi's encoder, which the kernel offers as a video device rather
+# than through the display stack. Without it the encoder's open is refused and
+# a guest is ended at the first picture.
+DeviceAllow=char-video4linux rw
 
 # **Not `strict`, deliberately.** The session's own sockets live under /run,
 # and a read-only /run refuses a connection to one, which would take the

@@ -581,6 +581,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let backend = match flag("--encoder").as_deref() {
         Some("vendor" | "nvenc") => Some(lowlat_host::stream::Backend::Vendor),
         Some("open" | "vaapi") => Some(lowlat_host::stream::Backend::Open),
+        Some("v4l2" | "pi") => Some(lowlat_host::stream::Backend::V4l2),
         _ => None,
     };
     // **A name pins the interface; absent follows the device** -- the compute
