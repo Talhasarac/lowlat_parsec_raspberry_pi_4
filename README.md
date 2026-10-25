@@ -1,22 +1,45 @@
 # lowlat
 
-> **A personal build.** This is a copy of [nomi-san/lowlat](https://github.com/nomi-san/lowlat)
-> with four fixes that are sent upstream but not merged yet, and one that is only here. With them
-> it hosts on Ubuntu 26.04 under GNOME, on AMD, Intel and NVIDIA:
+> **A Raspberry Pi 4 build.** This is [lowlat_personal_use](https://github.com/Talhasarac/lowlat_personal_use),
+> a copy of [nomi-san/lowlat](https://github.com/nomi-san/lowlat) with fixes for Ubuntu and GNOME,
+> plus hosting on a **Raspberry Pi 4** running Raspberry Pi OS 13 (trixie) with its standard
+> desktop. The Pi support is only here.
+>
+> **How the Pi differs.** Its GPU cannot convert the screen for an encoder, so lowlat hands the
+> screen's own buffer to the Pi's hardware H.264 encoder (`/dev/video11`), which converts it as
+> it reads it. Nothing is copied and no GPU work runs.
+>
+> - H.264 only, 8-bit 4:2:0. A client that asks for HEVC, 10-bit or 4:4:4 gets H.264.
+> - Tested at 1280x720 and 60 fps; the encoder is rated for 1080p at 30 fps.
+> - Variable bitrate up to 25 Mbit/s: the Pi's firmware refuses constant bitrate.
+> - Colours are close but not exact: the encoder converts with BT.601, and Parsec decodes BT.709,
+>   so saturated greens are slightly darker.
+> - Copy and paste does not work on the Pi's desktop (labwc) yet, and the tray does not start there.
+>
+> **Setup on the Pi:**
+>
+> 1. With no monitor plugged in, force the HDMI output on: add ` video=HDMI-A-1:1280x720@60D` to the
+>    end of the single line in `/boot/firmware/cmdline.txt` and reboot. With a monitor, skip this.
+> 2. Download `lowlat-pi4.deb` from this repository's Releases, then:
+>
+>    ```sh
+>    sudo apt install ./lowlat-pi4.deb
+>    sudo lowlat-login --install
+>    ```
+>
+> 3. For sound, add `PULSE_SERVER=unix:/run/user/1000/pulse/native` to `/etc/lowlat/lowlatd.env`, then
+>    `sudo systemctl restart lowlatd`.
+>
+> To build the package yourself, cross-compile on an x86-64 Linux machine with
+> `scripts/build-pi4.sh`; its header says what it needs.
+>
+> The fixes from lowlat_personal_use are here too:
 >
 > - [#3](https://github.com/nomi-san/lowlat/pull/3): GNOME's ten-bit screen (`XRGB2101010`) is captured; without it nothing streams.
 > - [#4](https://github.com/nomi-san/lowlat/pull/4): a game on an AMD APU no longer freezes the stream on old pictures.
 > - [#5](https://github.com/nomi-san/lowlat/pull/5): GNOME's `HDMI-1` is matched to the kernel's `HDMI-A-1`, so the pointer stays on an HDMI screen.
 > - [#6](https://github.com/nomi-san/lowlat/pull/6): HEVC works on Intel's integrated GPUs instead of hanging the GPU.
-> - Copy and paste with a Parsec client works on GNOME, both ways. Only in this build: GNOME has no
->   clipboard lowlat could reach, and this reaches it through Mutter's remote desktop interface.
->
-> To install, download the newest `.deb` from this repository's Releases, then:
->
-> ```sh
-> sudo apt install ./lowlat-personal.deb
-> sudo lowlat-login --install
-> ```
+> - Copy and paste with a Parsec client works on GNOME, both ways.
 >
 > The project, its docs and its issues live upstream. Everything below is upstream's README,
 > unchanged.
