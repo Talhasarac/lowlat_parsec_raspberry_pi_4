@@ -1,0 +1,13 @@
+# Starts the session helper and the tray on desktops that never reach
+# graphical-session.target, which the user units wait for: labwc on the
+# Raspberry Pi is one. Where the target is reached the units are running
+# already, and starting them again does nothing. The display's variables are
+# handed to the user manager first, because this may run before the desktop's
+# own entry that does it.
+[Desktop Entry]
+Type=Application
+Name=lowlat session helper
+Comment=Lets lowlat share the clipboard and show its tray in this session
+Exec=sh -c "systemctl --user import-environment WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP; exec systemctl --user start lowlat-session.service lowlat-tray.service"
+NoDisplay=true
+Terminal=false

@@ -14,7 +14,9 @@
 > - Variable bitrate up to 25 Mbit/s: the Pi's firmware refuses constant bitrate.
 > - Colours are close but not exact: the encoder converts with BT.601, and Parsec decodes BT.709,
 >   so saturated greens are slightly darker.
-> - Copy and paste does not work on the Pi's desktop (labwc) yet, and the tray does not start there.
+> - Copy and paste works both ways, through labwc's clipboard protocol (`ext-data-control-v1`); it
+>   also serves other wlroots desktops. An autostart entry starts the session helper and the tray,
+>   which labwc would not otherwise start.
 >
 > **Setup on the Pi:**
 >

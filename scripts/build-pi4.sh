@@ -21,7 +21,7 @@ export AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar
 # binary for panic messages, absolute for every dependency, so the cargo home,
 # the toolchain and this checkout are renamed to fixed stand-ins; without this
 # the package carries the builder's user name and directory layout.
-root=$(pwd)
+root=$(pwd -P)
 cargo_home=${CARGO_HOME:-$HOME/.cargo}
 rustup_home=${RUSTUP_HOME:-$HOME/.rustup}
 export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$cargo_home=/cargo --remap-path-prefix=$rustup_home=/rustup --remap-path-prefix=$root=/lowlat"
