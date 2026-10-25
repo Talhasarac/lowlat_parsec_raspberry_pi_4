@@ -17,6 +17,16 @@ export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
 export CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc
 export AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar
 
+# **The builder's folders do not ship.** Source paths are compiled into the
+# binary for panic messages, absolute for every dependency, so the cargo home,
+# the toolchain and this checkout are renamed to fixed stand-ins; without this
+# the package carries the builder's user name and directory layout.
+root=$(pwd)
+cargo_home=${CARGO_HOME:-$HOME/.cargo}
+rustup_home=${RUSTUP_HOME:-$HOME/.rustup}
+export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$cargo_home=/cargo --remap-path-prefix=$rustup_home=/rustup --remap-path-prefix=$root=/lowlat"
+export CFLAGS_aarch64_unknown_linux_gnu="-ffile-prefix-map=$cargo_home=/cargo -ffile-prefix-map=$root=/lowlat"
+
 "${CARGO:-cargo}" build --release --target "$target" -p lowlatd
 # The pi4 variant states the library versions the binary needs, rather than
 # reading them from this machine's cross libraries, which are newer than the
